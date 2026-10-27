@@ -1,0 +1,27 @@
+groups:
+- name: amrutam-slo
+  rules:
+  - alert: ReadLatencySLOBreach            # p95 reads < 200ms
+    expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{method="GET"}[5m]))) > 0.2
+    for: 10m
+    labels: { severity: page }
+  - alert: WriteLatencySLOBreach           # p95 writes < 500ms
+    expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{method=~"POST|PATCH|DELETE"}[5m]))) > 0.5
+    for: 10m
+    labels: { severity: page }
+  - alert: AvailabilityBurnRateFast        # 99.95% => 0.05% error budget; 14.4x burn over 1h ~ 2% of monthly budget
+    expr: (sum(rate(http_request_duration_seconds_count{status=~"5.."}[1h])) / sum(rate(http_request_duration_seconds_count[1h]))) > (14.4 * 0.0005)
+    for: 5m
+    labels: { severity: page }
+  - alert: OutboxBacklog
+    expr: outbox_pending > 1000
+    for: 10m
+    labels: { severity: ticket }
+  - alert: DBPoolSaturation
+    expr: db_pool_waiting > 5
+    for: 5m
+    labels: { severity: ticket }
+  - alert: PaymentFailureSpike
+    expr: sum(rate(payments_total{outcome="failed"}[10m])) / sum(rate(payments_total[10m])) > 0.2
+    for: 10m
+    labels: { severity: page }

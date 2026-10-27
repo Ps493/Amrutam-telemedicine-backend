@@ -1,0 +1,116 @@
+openapi: 3.0.3
+info:
+  title: Amrutam Telemedicine API
+  version: 1.0.0
+  description: |
+    Backend for doctor discovery, booking, consultations, prescriptions, audit and analytics.
+    **Idempotency:** all state-changing booking/payment/prescription/cancel calls REQUIRE an `Idempotency-Key` header (8-128 chars).
+    **Errors:** uniform envelope `{error:{code,message,details,requestId}}`.
+servers: [{ url: http://localhost:3000 }]
+security: [{ bearerAuth: [] }]
+tags: [{ name: Auth }, { name: Users }, { name: Doctors }, { name: Consultations }, { name: Admin }, { name: Ops }]
+paths:
+  /v1/auth/register:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Register patient or doctor (admins cannot self-register)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/Register' } } } }
+      responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Error' }, '422': { $ref: '#/components/responses/Error' } }
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Login (lockout after 5 failures; TOTP required when MFA enabled)
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [email, password], properties: { email: { type: string }, password: { type: string }, mfaCode: { type: string, pattern: '^\d{6}$' } } } } } }
+      responses: { '200': { description: Tokens, content: { application/json: { schema: { $ref: '#/components/schemas/Tokens' } } } }, '401': { $ref: '#/components/responses/Error' }, '423': { $ref: '#/components/responses/Error' } }
+  /v1/auth/refresh:
+    post: { tags: [Auth], security: [], summary: Rotate refresh token (reuse detection revokes session family), requestBody: { required: true, content: { application/json: { schema: { type: object, required: [refreshToken], properties: { refreshToken: { type: string } } } } } }, responses: { '200': { description: Tokens }, '401': { $ref: '#/components/responses/Error' } } }
+  /v1/auth/logout:
+    post: { tags: [Auth], security: [], summary: Revoke refresh token, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [refreshToken], properties: { refreshToken: { type: string } } } } } }, responses: { '204': { description: Revoked } } }
+  /v1/auth/mfa/setup:
+    post: { tags: [Auth], summary: Generate TOTP secret (stored encrypted), responses: { '200': { description: otpauth URL + secret } } }
+  /v1/auth/mfa/enable:
+    post: { tags: [Auth], summary: Verify first code and enable MFA; returns MFA-verified tokens, requestBody: { required: true, content: { application/json: { schema: { type: object, required: [code], properties: { code: { type: string } } } } } }, responses: { '200': { description: Tokens } } }
+  /v1/users/me:
+    get: { tags: [Users], summary: Current profile (PII decrypted), responses: { '200': { description: OK } } }
+    patch: { tags: [Users], summary: Update profile, responses: { '200': { description: OK } } }
+  /v1/doctors:
+    get:
+      tags: [Doctors]
+      summary: Search/filter verified doctors (cached 30s)
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: specialization, in: query, schema: { type: string } }
+        - { name: language, in: query, schema: { type: string } }
+        - { name: minRating, in: query, schema: { type: number } }
+        - { name: maxFeePaise, in: query, schema: { type: integer } }
+        - { name: availableOn, in: query, schema: { type: string, format: date } }
+        - { name: sort, in: query, schema: { type: string, enum: [rating, fee, experience] } }
+        - { name: page, in: query, schema: { type: integer, default: 1 } }
+        - { name: limit, in: query, schema: { type: integer, default: 20, maximum: 50 } }
+      responses: { '200': { description: Paged doctors } }
+  /v1/doctors/{id}/slots:
+    get: { tags: [Doctors], summary: Open slots for a doctor, parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '200': { description: Slots } } }
+  /v1/doctors/me/slots:
+    post: { tags: [Doctors], summary: Create availability (doctor+MFA; overlap rejected by DB exclusion constraint), responses: { '201': { description: Created }, '409': { $ref: '#/components/responses/Error' } } }
+  /v1/doctors/me/slots/{id}:
+    delete: { tags: [Doctors], summary: Withdraw an open slot, parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '204': { description: Cancelled } } }
+  /v1/consultations:
+    post:
+      tags: [Consultations]
+      summary: Book a slot (saga step 1 - holds slot 10 min, creates payment intent)
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [slotId], properties: { slotId: { type: string, format: uuid }, reason: { type: string, maxLength: 1000 } } } } } }
+      responses: { '201': { description: PENDING_PAYMENT consultation }, '409': { description: SLOT_UNAVAILABLE / idempotency in progress }, '422': { description: Idempotency key reused with different payload } }
+    get: { tags: [Consultations], summary: List own consultations, responses: { '200': { description: Paged } } }
+  /v1/consultations/{id}:
+    get: { tags: [Consultations], summary: Get consultation (participants/admin; 404 for others), parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '200': { description: OK }, '404': { $ref: '#/components/responses/Error' } } }
+  /v1/consultations/{id}/pay:
+    post:
+      tags: [Consultations]
+      summary: Pay (saga step 2). Gateway call retried w/ backoff+jitter; 3 failures compensates (slot released)
+      parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, required: [paymentToken], properties: { paymentToken: { type: string } } } } } }
+      responses: { '200': { description: CONFIRMED }, '402': { description: Payment failed }, '409': { description: Hold expired / invalid state }, '502': { description: Provider unavailable } }
+  /v1/consultations/{id}/start:
+    post: { tags: [Consultations], summary: Doctor starts (<=10 min before schedule; MFA), parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '200': { description: IN_PROGRESS } } }
+  /v1/consultations/{id}/complete:
+    post: { tags: [Consultations], summary: Doctor completes with encrypted notes, parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '200': { description: COMPLETED } } }
+  /v1/consultations/{id}/cancel:
+    post: { tags: [Consultations], summary: Cancel; frees slot; refund queued via outbox, parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '200': { description: CANCELLED }, '409': { $ref: '#/components/responses/Error' } } }
+  /v1/consultations/{id}/prescription:
+    post: { tags: [Consultations], summary: Issue prescription (doctor+MFA; encrypted at rest; one per consultation), parameters: [{ $ref: '#/components/parameters/Id' }, { $ref: '#/components/parameters/IdempotencyKey' }], responses: { '201': { description: Created } } }
+    get: { tags: [Consultations], summary: Read prescription (patient/doctor; access audited), parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '200': { description: OK } } }
+  /v1/admin/analytics/overview:
+    get: { tags: [Admin], summary: KPIs - status breakdown, daily series, revenue, top doctors (MFA; read replica; cached 60s), parameters: [{ name: from, in: query, schema: { type: string, format: date-time } }, { name: to, in: query, schema: { type: string, format: date-time } }], responses: { '200': { description: OK } } }
+  /v1/admin/audit-logs:
+    get: { tags: [Admin], summary: Query audit trail, responses: { '200': { description: OK } } }
+  /v1/admin/audit-logs/verify:
+    get: { tags: [Admin], summary: Verify hash-chain integrity, responses: { '200': { description: '{valid, checked, brokenAtId?}' } } }
+  /v1/admin/doctors/{id}/verify:
+    post: { tags: [Admin], summary: Verify a doctor's credentials, parameters: [{ $ref: '#/components/parameters/Id' }], responses: { '204': { description: Verified } } }
+  /healthz: { get: { tags: [Ops], security: [], summary: Liveness, responses: { '200': { description: ok } } } }
+  /readyz:  { get: { tags: [Ops], security: [], summary: Readiness (DB), responses: { '200': { description: ready }, '503': { description: not ready } } } }
+  /metrics: { get: { tags: [Ops], security: [], summary: Prometheus metrics (restrict at network layer), responses: { '200': { description: text } } } }
+components:
+  securitySchemes: { bearerAuth: { type: http, scheme: bearer, bearerFormat: JWT } }
+  parameters:
+    Id: { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+    IdempotencyKey: { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 128 } }
+  responses:
+    Error: { description: Error, content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
+  schemas:
+    Error: { type: object, properties: { error: { type: object, properties: { code: { type: string }, message: { type: string }, details: {}, requestId: { type: string } } } } }
+    Tokens: { type: object, properties: { accessToken: { type: string }, refreshToken: { type: string }, expiresIn: { type: integer }, tokenType: { type: string }, mfaSetupRequired: { type: boolean } } }
+    Register:
+      type: object
+      required: [email, password, fullName]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 10 }
+        fullName: { type: string }
+        phone: { type: string }
+        dob: { type: string, format: date }
+        role: { type: string, enum: [patient, doctor], default: patient }
+        doctor: { type: object, properties: { specialization: { type: string }, licenseNo: { type: string }, yearsExperience: { type: integer }, consultationFeePaise: { type: integer }, languages: { type: array, items: { type: string } } } }

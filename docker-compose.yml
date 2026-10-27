@@ -1,0 +1,45 @@
+# Local full stack: API + worker + Postgres + Redis + Prometheus + Grafana + Jaeger(OTLP)
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_USER: amrutam, POSTGRES_PASSWORD: amrutam, POSTGRES_DB: amrutam }
+    ports: ["5433:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U amrutam"], interval: 5s, retries: 10 }
+  redis:
+    image: redis:7-alpine
+    ports: ["6380:6379"]
+  migrate:
+    build: .
+    command: node scripts/migrate.js
+    environment: &env
+      DATABASE_URL: postgres://amrutam:amrutam@postgres:5432/amrutam
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: local-dev-secret-local-dev-secret-123456
+      ENCRYPTION_KEYRING: "v1:BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+      ACTIVE_KEY_VERSION: v1
+      OTEL_ENABLED: "false"
+    depends_on: { postgres: { condition: service_healthy } }
+  api:
+    build: .
+    environment: *env
+    ports: ["3000:3000"]
+    depends_on: { migrate: { condition: service_completed_successfully } }
+  worker:
+    build: .
+    command: node src/worker.js
+    environment: *env
+    depends_on: { migrate: { condition: service_completed_successfully } }
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes: ["./observability/prometheus.yml:/etc/prometheus/prometheus.yml", "./observability/alerts.yml:/etc/prometheus/alerts.yml"]
+    ports: ["9090:9090"]
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports: ["3001:3000"]
+    volumes: ["./observability/grafana:/etc/grafana/provisioning/dashboards-src"]
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    environment: { COLLECTOR_OTLP_ENABLED: "true" }
+    ports: ["16686:16686", "4318:4318"]
+volumes: { pgdata: {} }

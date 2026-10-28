@@ -32,7 +32,7 @@ npm run migrate                    # applies migrations/*.sql
 npm run seed                       # admin@amrutam.test / doctor1..3@amrutam.test / patient@amrutam.test  (pw Str0ngPassw0rd!)
 npm run dev                        # API on :3000
 npm run worker                     # separate terminal: outbox + hold-expiry sweeper
-npm test                           # 34 tests against TEST_DATABASE_URL (default postgres://amrutam:amrutam@localhost:5432/amrutam_test)
+npm test                           # 36 tests against TEST_DATABASE_URL (default postgres://amrutam:amrutam@localhost:5432/amrutam_test)
 ```
 Generate keys: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` → `ENCRYPTION_KEYRING=v1:<key>`.
 

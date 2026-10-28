@@ -33,7 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker build -t amrutam-api:${{ github.sha }} .
-      - uses: aquasecurity/trivy-action@0.24.0   # container CVE scan
-        with: { image-ref: "amrutam-api:${{ github.sha }}", severity: "CRITICAL,HIGH", exit-code: "1", ignore-unfixed: true }
+      - name: Build container image
+        run: docker build -t amrutam-api:${{ github.sha }} .
+      - name: Container CVE scan (Trivy, fails on fixable HIGH/CRITICAL)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.0 \
+            image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 amrutam-api:${{ github.sha }}
       # On main: push to ECR (OIDC role, no long-lived keys), then `kubectl set image` / ArgoCD sync with progressive rollout.
